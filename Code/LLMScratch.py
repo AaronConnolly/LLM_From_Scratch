@@ -225,23 +225,24 @@ if torch.cuda.is_available():
 train_loader = DataLoaderLite(B=4, T=1024) # batch size 4, sequence length 32
 
 # get logits
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 
 # Optimise!
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+for i in range(10):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device) # move to device
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # gradient clipping
     optimizer.step()
     t1 = time.time()
     dt = (t1 - t0) * 1000 # in milliseconds
     tokens_per_second = (train_loader.B * train_loader.T) / (t1 - t0)
-    print(f"step {i} loss: {loss.item()}, dt: {dt:.2f} ms, tokens/sec: {tokens_per_second:.2f}")
+    print(f"step {i} | loss: {loss.item()} | norm: {norm:.4f} | dt: {dt:.2f} ms | tokens/sec: {tokens_per_second:.2f}")
 
 
 import sys; sys.exit(0)
