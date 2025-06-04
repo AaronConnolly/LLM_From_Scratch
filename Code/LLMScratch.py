@@ -87,7 +87,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size() # batch size, sequence length, embedding dimensionality (n_embd)
         assert T <= self.config.block_size, f"Cannot forwared sequence of length {T}, block size is less than T"
@@ -95,14 +95,17 @@ class GPT(nn.Module):
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
         pos_emb = self.transformer.wpe(pos) # positional embeddings of shape (T, n_embd)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, N_embd)
-        idx = tok_emb + pos_emb
+        x = tok_emb + pos_emb
         # forward the blocks of the transformer
         for block in self.transformer.h:
-            idx = block(idx)
+            x = block(x)
         # forward the final layernorm and the classifier
-        idx = self.transformer.ln_f(idx)
-        logits = self.lm_head(idx)
-        return logits
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -179,9 +182,9 @@ y = buf[1:].view(B, T)
 # get logits
 model = GPT(GPTConfig())
 model.to(device)
-logits = model(x)
+logits, loss = model(x, y)
 
-print(logits.shape)
+print(loss)
 import sys; sys.exit(0)
 
 # prefix tokens
