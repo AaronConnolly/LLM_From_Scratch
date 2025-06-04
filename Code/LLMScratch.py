@@ -190,8 +190,8 @@ class GPT(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         #if master_process:
-        #    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        #    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and "cuda" in device
@@ -248,6 +248,15 @@ torch.manual_seed(1337) # set the seed for reproducibility
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
+total_batch_size = 524288 # total number of tokens to process in one epoch
+B = 4 # micro batch size
+T = 1024 # sequence length
+assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T) # number of gradient accumulation steps
+print(f"total_batch_size: {total_batch_size}")
+print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+
 # load the data
 train_loader = DataLoaderLite(B=4, T=1024) # batch size 4, sequence length 32
 
@@ -278,11 +287,16 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 
 for step in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device) # move to device
     optimizer.zero_grad()
-    logits, loss = model(x, y)
-    loss.backward()
+    lost_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        # get the next batch of data
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device) 
+        logits, loss = model(x, y)
+        loss = loss / grad_accum_steps # scale the loss for gradient accumulation
+        lost_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # gradient clipping
     # determine and set the learning rate for this iterarion
     lr = get_lr(step)
