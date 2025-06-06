@@ -70,9 +70,9 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024 # max sequence length
     vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    n_layer: int = 4 # 12 # number of layers
+    n_head: int = 8 # 12 number of heads
+    n_embd: int = 256 # 768 embedding dimension NOTE: n_head has to divide n_embd evenly
 
 
 class GPT(nn.Module):
@@ -204,35 +204,61 @@ class GPT(nn.Module):
 import tiktoken
 import time
 import math
+import numpy as np
+import os
+
+def load_tokens(filename):
+    npt = np.load(filename)
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
 
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, split):
         self.B = B
         self.T = T
+        assert split in {'train', 'val'}
 
-        with open('Code/input.txt', 'r') as f:
-            text = f.read()
-        enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens from input.txt")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches of size {B} x {T}")
+        # Get the shard filenames
+        data_root = "Code/edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"No shards found for split {split}"
+        print(f"Found {len(shards)} shards for split {split}")
 
-        # state
+        # Initialize state
+        self.current_shard = 0
+        self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = 0
 
-    def next_batch(self):
-        B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # targets
-        # advance the position in the tensor
-        self.current_position += B * T
-        # if loading the next batch would be out of bounds, advance to next shard
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            self.current_position = 0
-        return x, y
+    def load_tokens(self, filename):
+        """
+        Load tokens from a shard file.
+        """
+        npt = np.load(filename)
+        return torch.tensor(npt, dtype=torch.long)
 
+    def next_batch(self):
+        """
+        Get the next batch of data.
+        """
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
+        x = buf[:-1].view(B, T)  # Inputs
+        y = buf[1:].view(B, T)   # Targets
+
+        # Advance the position in the tensor
+        self.current_position += B * T
+
+        # If loading the next batch would go out of bounds, advance to the next shard
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = self.load_tokens(self.shards[self.current_shard])
+            self.current_position = 0
+
+        return x, y
 # ----------------------------------------------------------------------------------
 # attempt to auto-detect the device
 num_return_sequences = 5
@@ -248,9 +274,9 @@ torch.manual_seed(1337) # set the seed for reproducibility
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-total_batch_size = 524288 # total number of tokens to process in one epoch
+total_batch_size = 32768 # 524288 # total number of tokens to process in one epoch
 B = 4 # micro batch size
-T = 1024 # sequence length
+T = 512# 1024 # sequence length
 assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B * T"
 grad_accum_steps = total_batch_size // (B * T) # number of gradient accumulation steps
 print(f"total_batch_size: {total_batch_size}")
@@ -258,16 +284,19 @@ print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 
 # load the data
-train_loader = DataLoaderLite(B=4, T=1024) # batch size 4, sequence length 32
+train_loader = DataLoaderLite(B=4, T=512, split='train') # B=16, T=1024 batch size 4, sequence length 32
 
 # get logits
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 
-max_lr = 3e-4
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total parameters: {total_params / 1e6:.2f}M")  # Should print ~10M
+
+max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 10
+warmup_steps = 469 # 469 steps for 400M tokens with batch size 32768 
+max_steps = 12207 # 12207 steps for 400M tokens with batch size 32768
 def get_lr(it):
     # 1) Linear warmup for the first `warmup_steps` iterations
     if it < warmup_steps:
